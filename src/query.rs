@@ -1,6 +1,6 @@
 use crate::{
     document::Document, explanation::Explanation, get_field, make_term,
-    make_term_for_phrase_word, make_term_for_type, schema::FieldType,
+    make_term_for_type, make_term_text_only, schema::FieldType,
     searcher::Searcher, to_pyerr, DocAddress, Schema,
 };
 use core::ops::Bound as OpsBound;
@@ -306,7 +306,7 @@ impl Query {
         transposition_cost_one: bool,
         prefix: bool,
     ) -> PyResult<Query> {
-        let term = make_term_for_phrase_word(&schema.inner, field_name, text)?;
+        let term = make_term_text_only(&schema.inner, field_name, text)?;
         let inner = if prefix {
             tv::query::FuzzyTermQuery::new_prefix(
                 term,
@@ -346,19 +346,13 @@ impl Query {
         for (idx, word) in words.into_iter().enumerate() {
             if let Ok((offset, value)) = word.extract() {
                 // Custom offset is provided.
-                let term = make_term_for_phrase_word(
-                    &schema.inner,
-                    field_name,
-                    &value,
-                )?;
+                let term =
+                    make_term_text_only(&schema.inner, field_name, &value)?;
                 terms_with_offset.push((offset, term));
             } else {
                 // Custom offset is not provided. Use the list index as the offset.
-                let term = make_term_for_phrase_word(
-                    &schema.inner,
-                    field_name,
-                    &word,
-                )?;
+                let term =
+                    make_term_text_only(&schema.inner, field_name, &word)?;
                 terms_with_offset.push((idx, term));
             };
         }
@@ -442,19 +436,13 @@ impl Query {
         for (idx, word) in words.into_iter().enumerate() {
             if let Ok((offset, value)) = word.extract() {
                 // Custom offset is provided.
-                let term = make_term_for_phrase_word(
-                    &schema.inner,
-                    field_name,
-                    &value,
-                )?;
+                let term =
+                    make_term_text_only(&schema.inner, field_name, &value)?;
                 terms_with_offset.push((offset, term));
             } else {
                 // Custom offset is not provided. Use the list index as the offset.
-                let term = make_term_for_phrase_word(
-                    &schema.inner,
-                    field_name,
-                    &word,
-                )?;
+                let term =
+                    make_term_text_only(&schema.inner, field_name, &word)?;
                 terms_with_offset.push((idx, term));
             };
         }

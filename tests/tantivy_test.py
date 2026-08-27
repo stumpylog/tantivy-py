@@ -967,6 +967,7 @@ class TestJsonPathTermQueries:
                 "code": "5",
                 "big": 18446744073709551000,
                 "ts": "2021-01-01T00:00:00.500Z",
+                "score": 3.5,
             },
         )
         doc1.add_text("title", "alpha")
@@ -1038,6 +1039,43 @@ class TestJsonPathTermQueries:
         result = json_index.searcher().search(query, 10)
         assert len(result.hits) == 1
 
+    def test_term_query_json_subpath_float_whole_number_folding(self, json_index):
+        # A whole-number float must normalize to the same int representation
+        # the JSON indexer folds it to on write, or it can never match the
+        # integer leaf actually stored.
+        query = Query.term_query(json_index.schema, "attrs.count", 5.0)
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 1
+
+        query = Query.term_query(json_index.schema, "attrs.count", 6.0)
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 0
+
+    def test_term_query_json_subpath_fractional_float(self, json_index):
+        # A non-whole float is kept as a fast f64 value, matching a fractional
+        # JSON leaf exactly.
+        query = Query.term_query(json_index.schema, "attrs.score", 3.5)
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 1
+
+        query = Query.term_query(json_index.schema, "attrs.score", 3.6)
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 0
+
+    def test_term_query_json_subpath_non_finite_float(self, json_index):
+        # tantivy's JSON indexer silently drops a non-finite float leaf --
+        # never writing a term for it -- so a term built from one here could
+        # never match anything indexed. This must raise rather than silently
+        # building an unmatchable term.
+        with pytest.raises(ValueError):
+            Query.term_query(json_index.schema, "attrs.count", float("nan"))
+
+        with pytest.raises(ValueError):
+            Query.term_query(json_index.schema, "attrs.count", float("inf"))
+
+        with pytest.raises(ValueError):
+            Query.term_query(json_index.schema, "attrs.count", float("-inf"))
+
     def test_term_query_json_subpath_date_python_datetime(self, json_index):
         # The indexed value is truncated to whole-second precision by
         # tantivy's JSON indexer, so a Python datetime with sub-second
@@ -1090,6 +1128,32 @@ class TestJsonPathTermQueries:
             for _, addr in json_index.searcher().search(parsed_q, 10).hits
         }
         assert term_hits == parsed_hits
+
+    def test_phrase_prefix_query_json_subpath(self, json_index):
+        query = Query.phrase_prefix_query(
+            json_index.schema, "attrs.description", ["best", "vac"]
+        )
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 1
+
+        query = Query.phrase_prefix_query(
+            json_index.schema, "attrs.description", ["best", "toa"]
+        )
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 0
+
+    def test_term_set_query_json_subpath(self, json_index):
+        query = Query.term_set_query(
+            json_index.schema, "attrs.user", ["alice", "carol"]
+        )
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 1
+
+        query = Query.term_set_query(
+            json_index.schema, "attrs.user", ["alice", "bob"]
+        )
+        result = json_index.searcher().search(query, 10)
+        assert len(result.hits) == 2
 
     def test_term_query_json_string_leaf_looking_numeric(self, json_index):
         # Documented limitation: a single Term can't represent the union the
@@ -1187,6 +1251,43 @@ class TestJsonPathTermQueries:
         searcher = json_index.searcher()
         assert searcher.doc_freq("attrs.user", "alice") == 1
         assert searcher.doc_freq("attrs.user", "carol") == 0
+
+    def test_term_query_json_subpath_expand_dots_enabled(self):
+        # A literal "." in a JSON key is only treated as a nested path
+        # separator by term_query when expand_dots_enabled is set on the
+        # field -- this exercises that option through term_query itself,
+        # not just through the string query parser.
+        plain_schema = (
+            SchemaBuilder().add_json_field("attrs", stored=True).build()
+        )
+        plain_index = Index(plain_schema)
+        writer = plain_index.writer()
+        doc = Document()
+        doc.add_json("attrs", {"a.b": "hello"})
+        writer.add_document(doc)
+        writer.commit()
+        plain_index.reload()
+
+        query = Query.term_query(plain_index.schema, "attrs.a.b", "hello")
+        result = plain_index.searcher().search(query, 10)
+        assert len(result.hits) == 0
+
+        expand_schema = (
+            SchemaBuilder()
+            .add_json_field("attrs", stored=True, expand_dots_enabled=True)
+            .build()
+        )
+        expand_index = Index(expand_schema)
+        writer = expand_index.writer()
+        doc = Document()
+        doc.add_json("attrs", {"a.b": "hello"})
+        writer.add_document(doc)
+        writer.commit()
+        expand_index.reload()
+
+        query = Query.term_query(expand_index.schema, "attrs.a.b", "hello")
+        result = expand_index.searcher().search(query, 10)
+        assert len(result.hits) == 1
 
     def test_fuzzy_term_query_json_subpath(self, json_index):
         # tantivy's FuzzyTermQuery already handles json-path terms natively;

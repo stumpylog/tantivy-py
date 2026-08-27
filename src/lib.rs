@@ -172,14 +172,14 @@ pub(crate) fn make_term(
     make_term_impl(schema, field_name, field_value, false)
 }
 
-/// Like `make_term`, but for a single word inside a phrase
-/// (`Query.phrase_query` / `Query.phrase_prefix_query`). For a JSON subpath,
-/// a phrase word is always treated as text, never as a typed fast value —
-/// mirroring tantivy's own query parser, which only ever tokenizes phrase
-/// content as text. Without this, a phrase word that happens to look
-/// numeric/bool/date-like (e.g. "5") would silently become an untokenized
-/// typed term that can never match the indexed text posting for that word.
-pub(crate) fn make_term_for_phrase_word(
+/// Like `make_term`, but always treats a JSON subpath value as text, never
+/// as a typed fast value. Used for phrase words (`Query.phrase_query` /
+/// `Query.phrase_prefix_query`) and for `Query.fuzzy_term_query`, which are
+/// both text-only operations — mirroring tantivy's own query parser, which
+/// only ever tokenizes phrase content as text. Without this, a value that
+/// happens to look numeric/bool/date-like (e.g. "5") would silently become
+/// an untokenized typed term that can never match the indexed text posting.
+pub(crate) fn make_term_text_only(
     schema: &tv::schema::Schema,
     field_name: &str,
     field_value: &Bound<PyAny>,
@@ -243,13 +243,13 @@ fn make_term_impl(
 /// A JSON field has no single declared value type, so unlike the plain-field
 /// path in `make_term`, the Python value is read with its own type
 /// (`extract_value`) rather than coerced to a schema-declared one. Numeric and
-/// string handling mirrors tantivy's query parser (`generate_literals_for_json_object`
-/// in `query_parser.rs`): a string is first tried as a typed fast value
+/// string handling mirrors tantivy's JSON indexing path (`index_json_value`
+/// in `json_utils.rs`): a string is first tried as a typed fast value
 /// (int/float/bool/date) and only kept as text if that fails; a float that is
 /// a whole number is normalized to the same int representation the JSON
 /// indexer would have stored it as.
 ///
-/// When `text_only` is set (phrase words), a string value is always kept as
+/// When `text_only` is set (phrase words, fuzzy queries), a string value is always kept as
 /// text and never reinterpreted as a typed fast value.
 fn make_json_path_term(
     schema: &tv::schema::Schema,
@@ -306,6 +306,14 @@ fn make_json_path_term(
         Value::Bool(b) => term.append_type_and_fast_value(b),
         Value::I64(num) => term.append_type_and_fast_value(num),
         Value::F64(num) => {
+            // The JSON indexer never writes a term for a non-finite float
+            // (`json_utils.rs`'s leaf indexing silently drops it), so a term
+            // built from one here could never match anything indexed.
+            if !num.is_finite() {
+                return Err(exceptions::PyValueError::new_err(format!(
+                    "Can't create a term for Field `{field_name}` with non-finite value `{field_value}`."
+                )));
+            }
             match tv::columnar::NumericalValue::F64(num).normalize() {
                 tv::columnar::NumericalValue::I64(v) => {
                     term.append_type_and_fast_value(v)
